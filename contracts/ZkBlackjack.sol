@@ -49,6 +49,16 @@ contract ZkBlackjack {
     uint256 gameStartBlock;
   }
 
+  /// Deserialization of RISC0 journal
+  struct Output {
+      bytes32 dealerCommitment;
+      bytes32[] playerCommitments;
+      bytes32[2][] playerPubkeys;
+      uint256[] payouts;
+      uint8[][] doubleHands;
+      uint8[][] splitHands;
+  }
+
   /// EVENTS ///
 
   event GameStarted(address indexed player, uint256 indexed gameId, address indexed dealer);
