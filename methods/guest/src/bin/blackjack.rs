@@ -188,7 +188,9 @@ fn eval_payout(bets: &[U256], results: &[HandResult]) -> U256 {
     bets.iter()
         .zip(results)
         .map(|(bet, result)| match result {
-            HandResult::Bj => bet.checked_mul(U256::from(3)).unwrap().div_ceil(U256::from(2)),
+            HandResult::Bj => {
+                bet.checked_mul(U256::from(3)).unwrap().checked_div(U256::from(2)).unwrap()
+            }
             HandResult::Win => bet.checked_mul(U256::from(2)).unwrap(),
             HandResult::Push => *bet,
             HandResult::Lose => U256::ZERO,

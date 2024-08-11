@@ -2,8 +2,6 @@ use alloy_primitives::U256;
 use alloy_sol_types::{sol, SolInterface, SolValue};
 use anyhow::{Context, Result};
 use clap::Parser;
-use ethers::prelude::*;
-use methods::IS_EVEN_ELF;
 use risc0_ethereum_contracts::groth16;
 use risc0_zkvm::{default_prover, ExecutorEnv, ProverOpts, VerifierContext};
 
