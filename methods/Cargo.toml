@@ -19,3 +19,4 @@ risc0-zkvm = { workspace = true, features = ["client"] }
 
 k256 = { version = "0.13", features = ["ecdsa"] }
 rand = { version = "0.8", features = ["std"] }
+hex = { version = "0.4", features = ["std"] }

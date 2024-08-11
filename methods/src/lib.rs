@@ -11,16 +11,16 @@ mod tests {
 
     sol!(
         struct Input {
-            bytes16 dealerSeed;
+            bytes16 dealer_seed;
             GameInput[] games;
         }
     );
 
     sol!(
         struct GameInput {
-            bytes16 playerSeed;
+            bytes16 player_seed;
             bytes pubkey;
-            uint8 initialHands;
+            uint8 initial_hands;
             uint256[] bets;
             DeAction[] actions;
             bytes32[2][] signatures;
@@ -30,8 +30,10 @@ mod tests {
     sol!(
         struct DeAction {
             uint8 nonce;
-            uint8 handId;
+            uint8 hand_id;
             uint8 inner;
+            uint8[] my_cards;
+            uint8[] dealer_cards;
         }
     );
 
@@ -52,14 +54,16 @@ mod tests {
         let vk = VerifyingKey::from(&sk).to_encoded_point(false).to_bytes();
         let action = DeAction {
             nonce: 0,
-            handId: 0,
-            inner: 1,
+            hand_id: 0,
+            inner: 2,
+            my_cards: vec![2, 9],
+            dealer_cards: vec![10, 4],
         };
         let signature = sign_action(&action, sk);
         let game = GameInput {
-            playerSeed: [1u8; 16].into(),
-            pubkey: vk.into(),
-            initialHands: 1,
+            player_seed: [1u8; 16].into(),
+            pubkey: vk.clone().into(),
+            initial_hands: 1,
             bets: vec![U256::from(100)],
             actions: vec![action],
             signatures: vec![[
@@ -68,7 +72,7 @@ mod tests {
             ]],
         };
         let inputs = Input {
-            dealerSeed: [0u8; 16].into(),
+            dealer_seed: [0u8; 16].into(),
             games: vec![game],
         };
 

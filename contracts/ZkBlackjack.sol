@@ -10,6 +10,8 @@ contract ZkBlackjack {
     IRiscZeroVerifier public immutable verifier;
     bytes32 public constant imageId = ImageID.BLACKJACK_ID;
 
+    address public immutable registerAuthority;
+
     /// STRUCTS ///
 
     struct Dealer {
@@ -74,43 +76,19 @@ contract ZkBlackjack {
         uint256 playerWin
     );
 
-    /// ERRORS ///
-    error NotADealer();
-    error NotADealerOfThisGame();
-    error DealerIsNotOnline();
-    error DealerIsOnline();
-    error IsNotWhitelisted();
-    error DealerAlreadyRegistered();
-    error DealerHasPendingGame();
-    error GameAlreadyFinished();
-    error DealerIsBroke();
-
-    // Start game errors
-    error BetIsTooLow();
-    error BetIsTooHigh();
-    error BetsDoNotMatch();
-
-    // Transfer winnings errors
-    error TransferredArleady();
-
-    // Proof verification error
-    error InvalidProof();
-    error InvalidProofMetadata();
-
-    // Reclaim game error
-    error TimeoutNotReached();
-    error SenderIsNotPlayerOfTheGame();
-
     /// MODIFIERS ///
 
     /// onlyDealer
     modifier onlyDealer() {
-        require(dealers[msg.sender].addr == msg.sender, NotADealer());
+        require(dealers[msg.sender].addr == msg.sender, "not a dealer");
         _;
     }
 
     modifier onlyDealerOfTheGame(uint256 _gameId) {
-        require(games[_gameId].dealer == msg.sender, NotADealerOfThisGame());
+        require(
+            games[_gameId].dealer == msg.sender,
+            "not a dealer of this game"
+        );
         _;
     }
 
@@ -118,26 +96,31 @@ contract ZkBlackjack {
         for (uint256 i = 0; i < _gameIds.length; i++) {
             require(
                 games[_gameIds[i]].dealer == msg.sender,
-                NotADealerOfThisGame()
+                "not a dealer of this game"
             );
         }
         _;
     }
 
     modifier onlyOnlineDealer() {
-        require(dealers[msg.sender].addr == msg.sender, NotADealer());
-        require(dealers[msg.sender].online, DealerIsNotOnline());
+        require(dealers[msg.sender].addr == msg.sender, "not a dealer");
+        require(dealers[msg.sender].online, "dealer is not online");
         _;
     }
 
     modifier onlyOfflineDealer() {
-        require(dealers[msg.sender].addr == msg.sender, NotADealer());
-        require(!dealers[msg.sender].online, DealerIsOnline());
+        require(dealers[msg.sender].addr == msg.sender, "not a dealer");
+        require(!dealers[msg.sender].online, "dealer is online");
         _;
     }
 
     modifier allowedToRegisterDealer() {
-        require(dealerWhitelist[msg.sender], IsNotWhitelisted());
+        require(dealerWhitelist[msg.sender], "not allowed to register dealer");
+        _;
+    }
+
+    modifier onlyRegisterAuthority() {
+        require(msg.sender == registerAuthority, "not a register authority");
         _;
     }
 
@@ -158,8 +141,26 @@ contract ZkBlackjack {
     /// Whitelist for registering a dealer
     mapping(address => bool) public dealerWhitelist;
 
-    constructor(IRiscZeroVerifier _verifier) {
+    constructor(IRiscZeroVerifier _verifier, address _registerAuthority) {
         verifier = _verifier;
+        registerAuthority = _registerAuthority;
+    }
+
+    /// ADMIN FUNCTIONS ///
+
+    function setDealerWhitelist(
+        address _dealer,
+        bool _able
+    ) external onlyRegisterAuthority {
+        dealerWhitelist[_dealer] = _able;
+    }
+
+    function banDealer(address _dealer) external onlyRegisterAuthority {
+        dealers[_dealer].banned = true;
+    }
+
+    function unbanDealer(address _dealer) external onlyRegisterAuthority {
+        dealers[_dealer].banned = false;
     }
 
     /// PLAYER FUNCTIONS ///
@@ -168,18 +169,18 @@ contract ZkBlackjack {
         address _dealer,
         uint256[] calldata _initBets,
         bytes32 _playerCommitment,
-        bytes32 _playerPublicKey
+        bytes calldata _playerPublicKey
     ) external payable {
-        require(dealers[_dealer].addr == _dealer, NotADealer());
-        require(dealers[_dealer].online, DealerIsNotOnline());
-        require(dealers[_dealer].banned == false, NotADealer());
+        require(dealers[_dealer].addr == _dealer, "not a dealer");
+        require(dealers[_dealer].online, "dealer is not online");
+        require(dealers[_dealer].banned == false, "not a dealer");
         uint256 totalBet = 0;
         for (uint256 i = 0; i < _initBets.length; i++) {
-            require(_initBets[i] >= dealers[_dealer].minBet, BetIsTooLow());
-            require(_initBets[i] <= dealers[_dealer].maxBet, BetIsTooHigh());
+            require(_initBets[i] >= dealers[_dealer].minBet, "bet is too low");
+            require(_initBets[i] <= dealers[_dealer].maxBet, "bet is too high");
             totalBet += _initBets[i];
         }
-        require(msg.value == totalBet, BetsDoNotMatch());
+        require(msg.value == totalBet, "msg.value not equal total bet");
 
         Game storage game = games[newGameId];
         game.dealer = _dealer;
@@ -187,7 +188,7 @@ contract ZkBlackjack {
         game.bets = _initBets;
         game.playerCommitment = _playerCommitment;
         game.dealerCommitment = dealers[_dealer].commitment;
-        game.playerPublicKey = abi.encode(_playerPublicKey);
+        game.playerPublicKey = _playerPublicKey;
         game.gameStartBlock = block.number;
 
         _lockBalance(_dealer, totalBet);
@@ -199,12 +200,44 @@ contract ZkBlackjack {
     /// Player calls this function to double the bet on ONE OF his hands
     /// If split is not possible, the function does nothing and player loses the bet
     /// Reverts if dealer doesn't have enough money to match the bet
-    function double(uint256 _gameId, uint256 _handIndex) external payable {}
+    function double(uint256 _gameId, uint8 _handIndex) external payable {
+        Game storage game = games[_gameId];
+        require(game.player == msg.sender, "not a player");
+        require(!game.finished, "game already finished");
+        require(_handIndex < game.bets.length, "invalid hand index");
+        require(msg.value == game.bets[_handIndex], "msg.value not equal bet");
+        require(
+            dealers[game.dealer].balance - dealers[game.dealer].lockedBalance >=
+                getLocked(msg.value),
+            "dealer is broke"
+        );
+        game.bets[_handIndex] += msg.value;
+        game.doubleHands.push(_handIndex);
+        _lockBalance(game.dealer, msg.value);
+    }
 
     /// Player call this function to split the hand
     /// If split is not possible, the function does nothing and player loses the bet
     /// Reverts if dealer doesn't have enough money to match the bet
-    function split(uint256 _gameId, uint256 _handIndex) external payable {}
+    function split(uint256 _gameId, uint8 _handIndex) external payable {
+        Game storage game = games[_gameId];
+        require(game.player == msg.sender, "not a player");
+        require(!game.finished, "game already finished");
+        require(_handIndex < game.bets.length, "invalid hand index");
+        require(msg.value == game.bets[_handIndex], "msg.value not equal bet");
+        require(
+            dealers[game.dealer].balance - dealers[game.dealer].lockedBalance >=
+                getLocked(msg.value),
+            "dealer is broke"
+        );
+        game.bets.push(game.bets[game.bets.length - 1]);
+        for (uint256 i = game.bets.length - 1; i > _handIndex; i--) {
+            game.bets[i] = game.bets[i - 1];
+        }
+        game.bets[_handIndex + 1] = msg.value;
+        game.splitHands.push(_handIndex);
+        _lockBalance(game.dealer, msg.value);
+    }
 
     /// DEALER FUNCTIONS ///
 
@@ -217,7 +250,7 @@ contract ZkBlackjack {
     ) external allowedToRegisterDealer {
         require(
             dealers[msg.sender].addr == address(0),
-            DealerAlreadyRegistered()
+            "dealer already registered"
         );
 
         dealers[msg.sender] = Dealer({
@@ -259,11 +292,14 @@ contract ZkBlackjack {
         // check that dealer doesn't have any games pending
         for (uint256 i = 0; i < onlineGames.length; i++) {
             if (games[onlineGames[i]].dealer == msg.sender) {
-                revert DealerHasPendingGame();
+                revert("dealer has pending games");
             }
         }
         // sanity-check. should be good after the previous loop
-        require(dealers[msg.sender].lockedBalance == 0, DealerHasPendingGame());
+        require(
+            dealers[msg.sender].lockedBalance == 0,
+            "dealer has locked balance"
+        );
         dealers[msg.sender].online = false;
         for (uint256 i = 0; i < onlineDealers.length; i++) {
             if (onlineDealers[i] == msg.sender) {
@@ -275,7 +311,7 @@ contract ZkBlackjack {
     }
 
     function withdraw(uint256 _amount) external onlyOfflineDealer {
-        require(dealers[msg.sender].balance >= _amount, DealerIsBroke());
+        require(dealers[msg.sender].balance >= _amount, "dealer is broke");
         dealers[msg.sender].balance -= _amount;
         payable(msg.sender).transfer(_amount);
     }
@@ -294,12 +330,12 @@ contract ZkBlackjack {
         uint256 _payout
     ) external onlyDealerOfTheGame(_gameId) {
         Game storage game = games[_gameId];
-        require(!game.finished, GameAlreadyFinished());
-        require(game.playerWin == 0, TransferredArleady());
+        require(!game.finished, "game already finished");
+        require(game.playerWin == 0, "winnings already transferred");
         require(
             _payout >=
                 dealers[msg.sender].balance - dealers[msg.sender].lockedBalance,
-            DealerIsBroke()
+            "dealer is broke"
         );
         game.playerWin = _payout;
         // balance remains locked, will be unlocked after proof (in case dealer transferred too much)
@@ -321,13 +357,6 @@ contract ZkBlackjack {
             uint256 allBets = totalBets(_gameIds[i]);
             dealers[game.dealer].balance += allBets;
             game.finished = true;
-            emit GameResult(
-                game.player,
-                _gameIds[i],
-                msg.sender,
-                allBets,
-                game.playerWin
-            );
             // Transfer the winnings to the player if haven't yet
             if (_output.payouts[i] > game.playerWin) {
                 // Dealer hasn't transferred the winnings to the player yet
@@ -336,6 +365,13 @@ contract ZkBlackjack {
                 game.playerWin = _output.payouts[i];
                 _unlockBalance(_gameIds[i]);
                 game.player.transfer(payout);
+                emit GameResult(
+                    game.player,
+                    _gameIds[i],
+                    msg.sender,
+                    allBets,
+                    payout
+                );
             } else {
                 // Dealer has transferred more than the winnings to the player
                 // It's their problem, unfortunatelly
@@ -351,12 +387,12 @@ contract ZkBlackjack {
     /// And dealer is banned so that they can't start new games
     function reclaimGame(uint256 _gameId) external {
         Game storage game = games[_gameId];
-        require(!game.finished, GameAlreadyFinished());
-        require(game.player == msg.sender, SenderIsNotPlayerOfTheGame());
+        require(!game.finished, "game already finished");
+        require(game.player == msg.sender, "not a player");
         require(
             block.number >
                 game.gameStartBlock + dealers[game.dealer].timeoutBlocks,
-            TimeoutNotReached()
+            "timeout not reached"
         );
 
         uint256 allBets = totalBets(_gameId);
@@ -382,7 +418,7 @@ contract ZkBlackjack {
         dealers[dealer].lockedBalance += getLocked(newBet);
         require(
             dealers[dealer].lockedBalance <= dealers[dealer].balance,
-            DealerIsBroke()
+            "dealer is broke"
         );
     }
 
@@ -407,30 +443,46 @@ contract ZkBlackjack {
         verifier.verify(_seal, imageId, sha256(journal));
         for (uint256 i = 0; i < _gameIds.length; i++) {
             Game storage game = games[_gameIds[i]];
-            require(!game.finished, GameAlreadyFinished());
+            require(!game.finished, "game already finished");
             require(
                 keccak256(_output.playerPubkeys[i]) ==
                     keccak256(game.playerPublicKey),
-                InvalidProofMetadata()
+                "invalid proof player pubkey"
             );
             require(
                 _output.dealerCommitment == game.dealerCommitment,
-                InvalidProofMetadata()
+                "invalid proof dealer commitment"
             );
             require(
                 _output.playerCommitments[i] == game.playerCommitment,
-                InvalidProofMetadata()
+                "invalid proof player commitment"
             );
-            require(
-                keccak256(abi.encode(_output.doubleHands[i])) ==
-                    keccak256(abi.encode(game.doubleHands)),
-                InvalidProofMetadata()
-            );
-            require(
-                keccak256(abi.encode(_output.splitHands)) ==
-                    keccak256(abi.encode(game.splitHands)),
-                InvalidProofMetadata()
-            );
+            // There's an interesting attack vector here:
+            // Player could submit more actions onchain than offchain to the dealer
+            // and then proof would fail. To fix this we need to verify that 
+            // the actions in the proof are a subset of actions paid by the player
+            for (uint256 j = 0; j < _output.doubleHands[i].length; j++) {
+                // check if there exists a double action in the game
+                bool found = false;
+                for (uint256 k = 0; k < game.doubleHands.length; k++) {
+                    if (_output.doubleHands[i][j] == game.doubleHands[k]) {
+                        found = true;
+                        break;
+                    }
+                }
+                require(found, "invalid proof double hands");
+            }
+            for (uint256 j = 0; j < _output.splitHands[i].length; j++) {
+                // check if there exists a split action in the game
+                bool found = false;
+                for (uint256 k = 0; k < game.splitHands.length; k++) {
+                    if (_output.splitHands[i][j] == game.splitHands[k]) {
+                        found = true;
+                        break;
+                    }
+                }
+                require(found, "invalid proof split hands");
+            }
         }
     }
 

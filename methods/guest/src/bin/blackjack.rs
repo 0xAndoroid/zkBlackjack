@@ -37,6 +37,8 @@ sol!(
         uint8 nonce;
         uint8 handId;
         uint8 inner;
+        uint8[] my_cards;
+        uint8[] dealer_cards;
     }
 );
 
@@ -129,6 +131,8 @@ impl From<&DeAction> for Action {
         Action {
             hand_id: v.handId,
             inner: v.inner.into(),
+            my_cards: v.my_cards.clone(),
+            dealer_cards: v.dealer_cards.clone(),
         }
     }
 }
@@ -136,6 +140,8 @@ impl From<&DeAction> for Action {
 pub struct Action {
     pub hand_id: u8,
     pub inner: ActionType,
+    pub my_cards: Vec<u8>,
+    pub dealer_cards: Vec<u8>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -189,7 +195,7 @@ fn eval_payout(bets: &[U256], results: &[HandResult]) -> U256 {
         .zip(results)
         .map(|(bet, result)| match result {
             HandResult::Bj => {
-                bet.checked_mul(U256::from(3)).unwrap().checked_div(U256::from(2)).unwrap()
+                bet.checked_mul(U256::from(5)).unwrap().checked_div(U256::from(2)).unwrap()
             }
             HandResult::Win => bet.checked_mul(U256::from(2)).unwrap(),
             HandResult::Push => *bet,
@@ -241,14 +247,22 @@ fn run_blackjack(
         );
     }
 
-    for Action { hand_id, inner } in actions {
+    for Action { hand_id, inner, my_cards, dealer_cards } in actions {
+        // skip actions for hands that are not active
+        while !player_active[expected_hand_action as usize] {
+            expected_hand_action += 1;
+        }
         if hand_id != expected_hand_action {
             panic!("Unexpected hand")
         }
-        let hand_id = hand_id as usize;
-        if !player_active[hand_id] {
-            continue;
+        // check if the cards match the state
+        if player[hand_id as usize] != my_cards {
+            panic!("Invalid players cards: {:?}; dealer: {:?}", player[hand_id as usize], dealer);
         }
+        if dealer != dealer_cards {
+            panic!("Invalid dealer cards: {:?}; dealer: {:?}", player[hand_id as usize], dealer);
+        }
+        let hand_id = hand_id as usize;
         match inner {
             ActionType::Hit => {
                 if player[hand_id].iter().sum::<u8>() > 21 {
@@ -257,6 +271,7 @@ fn run_blackjack(
                 player[hand_id].push(get_card(&mut rng));
                 if player[hand_id].iter().sum::<u8>() > 21 {
                     player_active[hand_id] = false;
+                    expected_hand_action += 1;
                 }
             }
             ActionType::Stand => {
