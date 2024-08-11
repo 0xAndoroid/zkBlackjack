@@ -50,6 +50,8 @@ sol!(
         uint256[] payouts;
         uint8[][] double_hands;
         uint8[][] split_hands;
+        bytes32[] action_hash;
+        bool[] terminated;
     }
 );
 
@@ -67,6 +69,8 @@ fn main() {
     let mut payouts = Vec::<U256>::new();
     let mut double_hands = Vec::<Vec<u8>>::new();
     let mut split_hands = Vec::<Vec<u8>>::new();
+    let mut action_hash = Vec::<[u8; 32]>::new();
+    let mut terminated = Vec::<bool>::new();
 
     for game in inputs.games {
         let mut hasher = sha2::Sha256::new();
@@ -81,22 +85,40 @@ fn main() {
         .expect("verifying key");
 
         assert_eq!(game.actions.len(), game.signatures.len());
-        let actions = game
-            .actions
-            .iter()
-            .zip(game.signatures)
-            .zip(0..game.actions.len() as u8)
-            .map(|((action, signature), nonce)| {
-                assert_eq!(action.nonce, nonce);
-                let action_bytes = action.abi_encode();
-                let signature = Signature::from_slice(
-                    &signature[0].into_iter().chain(signature[1]).collect::<Vec<u8>>(),
-                )
-                .expect("signature");
-                pubkey.verify(&action_bytes, &signature).expect("signature verification");
-                action.into()
-            })
-            .collect::<Vec<Action>>();
+        let mut terminate = false;
+        for ((action, signature), nonce) in
+            game.actions.iter().zip(game.signatures).zip(0..game.actions.len() as u8)
+        {
+            assert_eq!(action.nonce, nonce);
+            let action_bytes = action.abi_encode();
+            let signature = Signature::from_slice(
+                &signature[0].into_iter().chain(signature[1]).collect::<Vec<u8>>(),
+            );
+            if signature.is_err() {
+                double_hands.push(Vec::new());
+                split_hands.push(Vec::new());
+                payouts.push(U256::ZERO);
+                action_hash.push(sha2::Sha256::digest(game.actions.abi_encode().as_slice()).into());
+                terminated.push(false);
+                terminate = true;
+                break;
+            }
+            let verif = pubkey.verify(&action_bytes, &signature.unwrap());
+            if verif.is_err() {
+                double_hands.push(Vec::new());
+                split_hands.push(Vec::new());
+                payouts.push(U256::ZERO);
+                action_hash.push(sha2::Sha256::digest(game.actions.abi_encode().as_slice()).into());
+                terminated.push(false);
+                terminate = true;
+                break;
+            }
+        }
+        if terminate {
+            continue;
+        }
+
+        let actions = game.actions.iter().map(|action| action.into()).collect::<Vec<Action>>();
 
         let game_seed: [u8; 32] = inputs
             .dealerSeed
@@ -107,13 +129,26 @@ fn main() {
             .expect("game seed len");
 
         let (results, doubled_hands_game, split_hands_game) =
-            run_blackjack(game_seed, game.initialHands as usize, actions);
+            match run_blackjack(game_seed, game.initialHands as usize, actions) {
+                Ok(v) => v,
+                Err(_) => {
+                    double_hands.push(Vec::new());
+                    split_hands.push(Vec::new());
+                    payouts.push(U256::ZERO);
+                    action_hash.push(sha2::Sha256::digest(game.actions.abi_encode().as_slice()).into());
+                    terminated.push(false);
+                    continue;
+                }
+            };
 
         double_hands.push(doubled_hands_game);
         split_hands.push(split_hands_game);
         let payout = eval_payout(&game.bets, &results);
         payouts.push(payout);
+        action_hash.push([0u8; 32]);
+        terminated.push(true);
     }
+    let action_hash = action_hash.into_iter().map(|x| x.into()).collect::<Vec<_>>();
 
     let output = Output {
         dealer_commitment: dealer_commitment.into(),
@@ -122,6 +157,8 @@ fn main() {
         payouts,
         double_hands,
         split_hands,
+        action_hash,
+        terminated,
     };
     env::commit_slice(output.abi_encode().as_slice());
 }
@@ -211,7 +248,7 @@ fn run_blackjack(
     seed: [u8; 32],
     initial_hands: usize,
     actions: Vec<Action>,
-) -> (Vec<HandResult>, Vec<u8>, Vec<u8>) {
+) -> Result<(Vec<HandResult>, Vec<u8>, Vec<u8>), ()> {
     let mut rng = ChaCha8Rng::from_seed(seed);
     let mut dealer = [get_card(&mut rng), get_card(&mut rng)].to_vec();
     let mut player = (0..initial_hands)
@@ -230,7 +267,7 @@ fn run_blackjack(
     });
 
     if is_blackjack(&dealer) {
-        return (
+        return Ok((
             player_active
                 .iter()
                 .map(|&hand| {
@@ -244,29 +281,35 @@ fn run_blackjack(
                 .collect(),
             Vec::new(),
             Vec::new(),
-        );
+        ));
     }
 
-    for Action { hand_id, inner, my_cards, dealer_cards } in actions {
+    for Action {
+        hand_id,
+        inner,
+        my_cards,
+        dealer_cards,
+    } in actions
+    {
         // skip actions for hands that are not active
         while !player_active[expected_hand_action as usize] {
             expected_hand_action += 1;
         }
         if hand_id != expected_hand_action {
-            panic!("Unexpected hand")
+            return Err(());
         }
         // check if the cards match the state
         if player[hand_id as usize] != my_cards {
-            panic!("Invalid players cards: {:?}; dealer: {:?}", player[hand_id as usize], dealer);
+            return Err(());
         }
         if dealer != dealer_cards {
-            panic!("Invalid dealer cards: {:?}; dealer: {:?}", player[hand_id as usize], dealer);
+            return Err(());
         }
         let hand_id = hand_id as usize;
         match inner {
             ActionType::Hit => {
                 if player[hand_id].iter().sum::<u8>() > 21 {
-                    panic!("Invalid action")
+                    return Err(());
                 }
                 player[hand_id].push(get_card(&mut rng));
                 if player[hand_id].iter().sum::<u8>() > 21 {
@@ -280,7 +323,7 @@ fn run_blackjack(
             }
             ActionType::Double => {
                 if player[hand_id].len() != 2 {
-                    panic!("Invalid action")
+                    return Err(());
                 }
                 player[hand_id].push(get_card(&mut rng));
                 player_active[hand_id] = false;
@@ -289,15 +332,15 @@ fn run_blackjack(
             }
             ActionType::Split => {
                 if player[hand_id].len() != 2 {
-                    panic!("Invalid action")
+                    return Err(());
                 }
                 // max of 5 hands allowed
                 if player.len() == 4 {
-                    panic!("Invalid action")
+                    return Err(());
                 }
                 // can only split if both cards are the same
                 if player[hand_id][0] != player[hand_id][1] {
-                    panic!("Invalid action")
+                    return Err(());
                 }
                 player.insert(hand_id + 1, [player[hand_id][1]].to_vec());
                 player[hand_id].pop();
@@ -308,7 +351,7 @@ fn run_blackjack(
     }
 
     if player_active.iter().any(|&active| active) {
-        panic!("not all hands terminated")
+        return Err(());
     }
 
     let dealer_sum = loop {
@@ -364,7 +407,7 @@ fn run_blackjack(
 
     let doubled_hands = doubled_hands.into_iter().map(|n| n as u8).collect();
     let split_hands = split_hands.into_iter().map(|n| n as u8).collect();
-    (result, doubled_hands, split_hands)
+    Ok((result, doubled_hands, split_hands))
 }
 
 fn get_card(rng: &mut ChaCha8Rng) -> u8 {

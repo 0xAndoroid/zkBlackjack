@@ -49,6 +49,18 @@ contract ZkBlackjack {
         uint8[] splitHands;
         /// Block number when the game was created. Used for timeout to prevent dealer from stalling
         uint256 gameStartBlock;
+        /// Request for actions from the player if weren't received offchain
+        uint256 playerActionsRequestedBlockNumber;
+        /// Actions received from player
+        bytes32 playerActionsHash;
+    }
+
+    struct DeAction {
+        uint8 nonce;
+        uint8 handId;
+        uint8 inner;
+        uint8[] my_cards;
+        uint8[] dealer_cards;
     }
 
     /// Deserialization of RISC0 journal
@@ -59,6 +71,8 @@ contract ZkBlackjack {
         uint256[] payouts;
         uint8[][] doubleHands;
         uint8[][] splitHands;
+        bytes32[] actionHash;
+        bool[] terminated;
     }
 
     /// EVENTS ///
@@ -390,6 +404,11 @@ contract ZkBlackjack {
         require(!game.finished, "game already finished");
         require(game.player == msg.sender, "not a player");
         require(
+            game.playerActionsRequestedBlockNumber > 0 &&
+                game.playerActionsHash == 0,
+            "player actions were requested and not provided"
+        );
+        require(
             block.number >
                 game.gameStartBlock + dealers[game.dealer].timeoutBlocks,
             "timeout not reached"
@@ -407,6 +426,64 @@ contract ZkBlackjack {
 
         emit GameResult(msg.sender, _gameId, game.dealer, allBets, payout);
         game.player.transfer(payout);
+    }
+
+    function requestPlayerActions(
+        uint256 _gameId
+    ) external onlyDealerOfTheGame(_gameId) {
+        Game storage game = games[_gameId];
+        require(!game.finished, "game already finished");
+        require(
+            game.playerActionsRequestedBlockNumber == 0,
+            "player actions already requested"
+        );
+        require(game.playerActionsHash == 0, "player actions already provided");
+        require(
+            block.number >
+                game.gameStartBlock + dealers[game.dealer].timeoutBlocks / 4, // 1/4 of game timeout
+            "timeout not reached"
+        );
+        game.playerActionsRequestedBlockNumber = block.number;
+    }
+
+    function provideActions(
+        uint256 _gameId,
+        DeAction[] calldata _actions
+    ) external {
+        Game storage game = games[_gameId];
+        require(game.player == msg.sender, "not a player");
+        require(!game.finished, "game already finished");
+        require(game.playerActionsHash == 0, "player actions already provided");
+
+        // check that splits and doubles onchain are a subset of splits and doubles in calldata
+        for (uint256 i = 0; i < game.doubleHands.length; i++) {
+            bool found = false;
+            for (uint256 j = 0; j < _actions.length; j++) {
+                if (
+                    _actions[j].inner == 2 &&
+                    _actions[j].handId == game.doubleHands[i]
+                ) {
+                    found = true;
+                    break;
+                }
+            }
+            require(found, "invalid double hands");
+        }
+        for (uint256 i = 0; i < game.splitHands.length; i++) {
+            bool found = false;
+            for (uint256 j = 0; j < _actions.length; j++) {
+                if (
+                    _actions[j].inner == 3 &&
+                    _actions[j].handId == game.splitHands[i]
+                ) {
+                    found = true;
+                    break;
+                }
+            }
+            require(found, "invalid split hands");
+        }
+        bytes32 actionsHash = sha256(abi.encode(_actions));
+        game.playerActionsHash = actionsHash;
     }
 
     function _unlockBalance(uint256 _gameId) internal {
@@ -457,31 +534,53 @@ contract ZkBlackjack {
                 _output.playerCommitments[i] == game.playerCommitment,
                 "invalid proof player commitment"
             );
-            // There's an interesting attack vector here:
-            // Player could submit more actions onchain than offchain to the dealer
-            // and then proof would fail. To fix this we need to verify that 
-            // the actions in the proof are a subset of actions paid by the player
-            for (uint256 j = 0; j < _output.doubleHands[i].length; j++) {
-                // check if there exists a double action in the game
-                bool found = false;
-                for (uint256 k = 0; k < game.doubleHands.length; k++) {
-                    if (_output.doubleHands[i][j] == game.doubleHands[k]) {
-                        found = true;
-                        break;
+            if (_output.terminated[i]) {
+                // There's an interesting attack vector here:
+                // Player could submit more actions onchain than offchain to the dealer
+                // and then proof would fail. To fix this we need to verify that
+                // the actions in the proof are a subset of actions paid by the player
+                for (uint256 j = 0; j < _output.doubleHands[i].length; j++) {
+                    // check if there exists a double action in the game
+                    bool found = false;
+                    for (uint256 k = 0; k < game.doubleHands.length; k++) {
+                        if (_output.doubleHands[i][j] == game.doubleHands[k]) {
+                            found = true;
+                            break;
+                        }
                     }
+                    require(found, "invalid proof double hands");
                 }
-                require(found, "invalid proof double hands");
-            }
-            for (uint256 j = 0; j < _output.splitHands[i].length; j++) {
-                // check if there exists a split action in the game
-                bool found = false;
-                for (uint256 k = 0; k < game.splitHands.length; k++) {
-                    if (_output.splitHands[i][j] == game.splitHands[k]) {
-                        found = true;
-                        break;
+                for (uint256 j = 0; j < _output.splitHands[i].length; j++) {
+                    // check if there exists a split action in the game
+                    bool found = false;
+                    for (uint256 k = 0; k < game.splitHands.length; k++) {
+                        if (_output.splitHands[i][j] == game.splitHands[k]) {
+                            found = true;
+                            break;
+                        }
                     }
+                    require(found, "invalid proof split hands");
                 }
-                require(found, "invalid proof split hands");
+            } else {
+                // actions provided by the player were invalid
+                require(
+                    game.playerActionsRequestedBlockNumber > 0,
+                    "player actions not requested"
+                );
+                if (game.playerActionsHash != 0) {
+                    require(
+                        _output.actionHash[i] == game.playerActionsHash,
+                        "invalid proof actions"
+                    );
+                } else {
+                    require(
+                        block.number >
+                            game.playerActionsRequestedBlockNumber +
+                                dealers[game.dealer].timeoutBlocks /
+                                2,
+                        "timeout not reached and actions were not received"
+                    );
+                }
             }
         }
     }

@@ -45,6 +45,8 @@ mod tests {
             uint256[] payouts;
             uint8[][] double_hands;
             uint8[][] split_hands;
+            bytes32[] action_hash;
+            bool[] terminated;
         }
     );
 
@@ -82,6 +84,7 @@ mod tests {
 
         let x = Output::abi_decode(&session_info.journal.bytes, true).unwrap();
         assert_eq!(x.payouts[0], U256::from(0));
+        assert_eq!(x.terminated[0], true);
     }
 
     fn sign_action(action: &DeAction, mut sk: SigningKey) -> Vec<u8> {
