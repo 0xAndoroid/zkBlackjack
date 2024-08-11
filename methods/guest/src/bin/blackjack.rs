@@ -24,7 +24,7 @@ sol!(
 sol!(
     struct GameInput {
         bytes16 playerSeed;
-        bytes32[2] pubkey;
+        bytes pubkey;
         uint8 initialHands;
         uint256[] bets;
         DeAction[] actions;
@@ -44,7 +44,7 @@ sol!(
     struct Output {
         bytes32 dealer_commitment;
         bytes32[] player_commitments;
-        bytes32[2][] player_pubkeys;
+        bytes[] player_pubkeys;
         uint256[] payouts;
         uint8[][] double_hands;
         uint8[][] split_hands;
@@ -61,7 +61,7 @@ fn main() {
     let dealer_commitment: [u8; 32] = hasher.finalize().into();
 
     let mut player_commitments = Vec::<FixedBytes<32>>::new();
-    let mut player_pubkeys = Vec::<[FixedBytes<32>; 2]>::new();
+    let mut player_pubkeys = Vec::<alloy_primitives::Bytes>::new();
     let mut payouts = Vec::<U256>::new();
     let mut double_hands = Vec::<Vec<u8>>::new();
     let mut split_hands = Vec::<Vec<u8>>::new();
@@ -71,13 +71,10 @@ fn main() {
         hasher.update(game.playerSeed);
         player_commitments
             .push(hasher.finalize().as_slice().try_into().expect("player commitment"));
-        player_pubkeys.push(game.pubkey);
+        player_pubkeys.push(game.pubkey.clone());
 
         let pubkey = VerifyingKey::from_encoded_point(
-            &EncodedPoint::from_bytes(
-                game.pubkey[0].into_iter().chain(game.pubkey[1]).collect::<Vec<u8>>(),
-            )
-            .expect("pubkey"),
+            &EncodedPoint::from_bytes(&game.pubkey).expect("pubkey"),
         )
         .expect("verifying key");
 
@@ -141,7 +138,7 @@ pub struct Action {
     pub inner: ActionType,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum ActionType {
     Hit,
     Stand,
@@ -293,6 +290,10 @@ fn run_blackjack(
         }
     }
 
+    if player_active.iter().any(|&active| active) {
+        panic!("not all hands terminated")
+    }
+
     let dealer_sum = loop {
         let number_of_aces = dealer.iter().filter(|&&card| card == 1).count();
         let mut dealer_sum = dealer.iter().sum::<u8>();
@@ -350,7 +351,7 @@ fn run_blackjack(
 }
 
 fn get_card(rng: &mut ChaCha8Rng) -> u8 {
-    let card: u8 = rng.gen();
+    let card: u8 = rng.gen::<u8>() % 13 + 1;
     if card > 10 {
         10
     } else {
